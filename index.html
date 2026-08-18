@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Bell Timer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #15171b;
+    --bg-panel: #1c1f24;
+    --bg-raised: #23262c;
+    --track-red: #c8443e;
+    --infield-green: #4c7a52;
+    --lane-white: #f2efe9;
+    --muted: #8b8d93;
+    --line: #33363d;
+    --font-display: 'Bebas Neue', sans-serif;
+    --font-ui: 'Inter', sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--lane-white);
+    font-family: var(--font-ui);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .card {
+    width: 100%;
+    max-width: 420px;
+    background: var(--bg-panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 36px 28px 28px;
+    text-align: center;
+    margin: 20px;
+  }
+  .interval-name { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.14em; margin-bottom: 10px; min-height: 16px; }
+  .clock { font-family: var(--font-display); font-size: 108px; line-height: 1; font-variant-numeric: tabular-nums; }
+  .total { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .lane-track { display: flex; gap: 3px; margin-top: 22px; height: 10px; }
+  .lane-seg { flex: 1; border-radius: 2px; background: var(--line); position: relative; overflow: hidden; }
+  .lane-seg .fill { position: absolute; inset: 0; width: 0%; background: var(--track-red); }
+  .lane-seg.done .fill { width: 100% !important; }
+  .transport { display: flex; gap: 10px; margin-top: 26px; }
+  button {
+    flex: 1;
+    font-family: var(--font-ui); font-weight: 600; font-size: 15px;
+    border-radius: 7px; border: 1px solid var(--line); padding: 14px 18px;
+    cursor: pointer; background: var(--bg-raised); color: var(--lane-white);
+  }
+  button:hover { filter: brightness(1.15); }
+  button:active { transform: scale(0.98); }
+  #startBtn { background: var(--infield-green); border-color: var(--infield-green); }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="interval-name" id="intervalName">Ready</div>
+  <div class="clock" id="clock">04:00</div>
+  <div class="total" id="totalLabel">Bells at 4:00, 5:00, 6:00, 8:00</div>
+  <div class="lane-track" id="laneTrack"></div>
+  <div class="transport">
+    <button id="startBtn">Start</button>
+    <button id="resetBtn">Reset</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  // Hardcoded intervals — edit duration (seconds) and sound (file path) to change the schedule.
+  // "sound" plays when that interval STARTS. Put your audio files at these paths, relative to this HTML file.
+  const INTERVALS = [
+    //{ name: 'Interval 1', duration: 240, sound: 'sounds/bell1.mp3' }, // 4:00
+    //{ name: 'Interval 2', duration: 60,  sound: 'sounds/bell2.mp3' }, // 1:00
+    //{ name: 'Interval 3', duration: 60,  sound: 'sounds/bell3.mp3' }, // 1:00
+    //{ name: 'Interval 4', duration: 120, sound: 'sounds/bell4.mp3' }, // 2:00
+    { name: 'Interval 1', duration: 10, sound: 'sounds/XC1106457_Clay-coloredThrush.wav' }, 
+    { name: 'Interval 2', duration: 10,  sound: 'sounds/XC573070_Keel-billedToucan_trim.mp3' }, 
+    { name: 'Interval 3', duration: 10,  sound: 'sounds/XC865929_Grey-headedChachalaca_trim.mp3' }, 
+    { name: 'Interval 4', duration: 10,  sound: 'sounds/XC552688_BarredAntshrike_trim.mp3' }
+  ];
+
+  let index = 0;
+  let remaining = INTERVALS[0].duration;
+  let tickHandle = null;
+  let running = false;
+  let wakeLock = null;
+
+  const clockEl = document.getElementById('clock');
+  const nameEl = document.getElementById('intervalName');
+  const trackEl = document.getElementById('laneTrack');
+  const startBtn = document.getElementById('startBtn');
+  const resetBtn = document.getElementById('resetBtn');
+
+  // Keeps the screen from locking while the timer runs. Only works on https (or localhost) —
+  // browsers block this API on file:// pages, which is why it needs GitHub Pages to take effect.
+  async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+    } catch (e) { /* not available right now; timer still works, screen just may lock */ }
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock) {
+      wakeLock.release().catch(() => {});
+      wakeLock = null;
+    }
+  }
+
+  // The wake lock auto-releases if the tab is backgrounded, so re-acquire it when the
+  // phone screen comes back on mid-timer (e.g. after a phone call interrupts the app).
+  document.addEventListener('visibilitychange', () => {
+    if (running && document.visibilityState === 'visible') requestWakeLock();
+  });
+
+  function formatTime(s) {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  }
+
+  function buildTrack(activeIndex = -1) {
+    trackEl.innerHTML = '';
+    INTERVALS.forEach((iv, i) => {
+      const seg = document.createElement('div');
+      seg.className = 'lane-seg';
+      if (i < activeIndex) seg.classList.add('done');
+      const fill = document.createElement('div');
+      fill.className = 'fill';
+      if (i === activeIndex) {
+        const pct = 100 - (remaining / iv.duration) * 100;
+        fill.style.width = pct + '%';
+      }
+      seg.appendChild(fill);
+      trackEl.appendChild(seg);
+    });
+  }
+
+  function playSound(path) {
+    try {
+      const a = new Audio(path);
+      a.play().catch(() => {});
+    } catch (e) { /* no-op */ }
+  }
+
+  function render() {
+    nameEl.textContent = running ? INTERVALS[index].name : 'Ready';
+    clockEl.textContent = formatTime(remaining);
+    buildTrack(running ? index : -1);
+  }
+
+  function tick() {
+    remaining--;
+    if (remaining <= 0) {
+      playSound(INTERVALS[index].sound); // this interval just ended
+      index++;
+      if (index >= INTERVALS.length) {
+        finish();
+        return;
+      }
+      remaining = INTERVALS[index].duration;
+    }
+    render();
+  }
+
+  function start() {
+    if (running) return;
+    running = true;
+    index = 0;
+    remaining = INTERVALS[0].duration;
+    startBtn.textContent = 'Running…';
+    requestWakeLock();
+    render();
+    tickHandle = setInterval(tick, 1000);
+  }
+
+  function finish() {
+    clearInterval(tickHandle);
+    running = false;
+    nameEl.textContent = 'Done';
+    clockEl.textContent = '00:00';
+    buildTrack(INTERVALS.length);
+    startBtn.textContent = 'Start';
+    releaseWakeLock();
+  }
+
+  function reset() {
+    clearInterval(tickHandle);
+    running = false;
+    index = 0;
+    remaining = INTERVALS[0].duration;
+    startBtn.textContent = 'Start';
+    releaseWakeLock();
+    render();
+  }
+
+  startBtn.addEventListener('click', start);
+  resetBtn.addEventListener('click', reset);
+
+  render();
+})();
+</script>
+
+</body>
+</html>
